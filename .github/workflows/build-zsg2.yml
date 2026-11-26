@@ -1,161 +1,21 @@
-name: Build TAITO ZSG-2 MAME Linux
+              'if (pcm_file)',
+              '{',
+              '\tstd::fwrite(mix, sizeof(mix[0]), 4, pcm_file);',
+              '}',
+              '',
+          ]
+          def insert_pcm(m):
+              indent = m.group(1)
+              return '\n'.join(indent + line if line else '' for line in lines) + '\n' + m.group(0)
 
-on:
-  workflow_dispatch:
-
-permissions:
-  contents: read
-
-jobs:
-  build:
-    runs-on: ubuntu-22.04
-    timeout-minutes: 360
-
-    env:
-      MAME_REV: 61c794064422682db7a1f8b3d58c21563333a9c8
-      ARTIFACT: taito-zsg2-mame-linux-x86_64
-
-    steps:
-      - name: Install dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y \
-            build-essential gcc-12 g++-12 \
-            git python3 pkg-config \
-            libsdl2-dev libsdl2-ttf-dev \
-            libfontconfig1-dev libasound2-dev \
-            libpulse-dev libx11-dev \
-            libxi-dev libxinerama-dev \
-            libgl1-mesa-dev libexpat1-dev \
-            zlib1g-dev zip unzip
-
-      - name: Checkout MAME
-        run: |
-          set -euo pipefail
-
-          mkdir mame
-          cd mame
-
-          git init
-          git remote add origin \
-            https://github.com/mamedev/mame.git
-
-          git fetch --depth=1 origin "$MAME_REV"
-          git checkout --detach FETCH_HEAD
-
-          git rev-parse HEAD
-
-          test "$(git rev-parse HEAD)" = "$MAME_REV"
-
-          test -f src/mame/sony/zn.cpp
-          test -f src/mame/sony/taitogn.cpp
-          test -f src/devices/sound/zsg2.cpp
-
-      - name: Add ZSG-2 analysis hooks
-        working-directory: mame
-        run: |
-          set -euo pipefail
-
-          python3 <<'PY'
-          from pathlib import Path
-          import re
-
-          p = Path("src/devices/sound/zsg2.cpp")
-          text = p.read_text()
-
-          text = (
-              "#include <cstdio>\n"
-              "#include <cstdlib>\n"
-              + text
-          )
-
-          pattern = (
-              r"(void zsg2_device::write"
-              r"\s*\([^)]*\)\s*\{)"
-          )
-
-          hook = r'''
-              static std::FILE *trace_file = []()
-                  -> std::FILE * {
-                  const char *path =
-                      std::getenv("ZSG2_TRACE");
-                  return path
-                      ? std::fopen(path, "wb")
-                      : nullptr;
-              }();
-
-              if (trace_file)
-                  std::fprintf(
-                      trace_file,
-                      "%.17g,%s,%u,%u,%u\n",
-                      machine().time().as_double(),
-                      tag(),
-                      unsigned(offset),
-                      unsigned(data),
-                      unsigned(mem_mask));
-          '''
-
-          text, n = re.subn(
-              pattern,
-              lambda m: m.group(1) + "\n" + hook,
-              text,
-              count=1
-          )
-
-          if n != 1:
-              raise RuntimeError(
-                  "ZSG2 register hook anchor not found"
-              )
-
-          pattern = (
-              r"for\s*\(int output = 0;"
-              r"\s*output < 4;"
-              r"\s*output\+\+\)\s*"
-              r"stream\.put_int_clamp"
-              r"\(output, i, mix\[output\], 32768\);"
-          )
-
-          hook = r'''
-              static std::FILE *pcm_file = []()
-                  -> std::FILE * {
-                  const char *path =
-                      std::getenv("ZSG2_PCM4");
-                  return path
-                      ? std::fopen(path, "wb")
-                      : nullptr;
-              }();
-
-              if (pcm_file)
-                  std::fwrite(
-                      mix,
-                      sizeof(mix[0]),
-                      4,
-                      pcm_file);
-
-          '''
-
-          text, n = re.subn(
-              pattern,
-              lambda m: hook + m.group(0),
-              text,
-              count=1
-          )
-
-          if n != 1:
-              raise RuntimeError(
-                  "ZSG2 PCM hook anchor not found"
-              )
-
-          # Remove trailing whitespace
-          text = "\n".join(
-              line.rstrip() for line in text.splitlines()
-          ) + "\n"
-
+          if len(re.findall(pattern, text, flags=re.M)) != 1:
+              raise RuntimeError('ZSG2 PCM hook anchor missing or ambiguous')
+          text = re.sub(pattern, insert_pcm, text, flags=re.M)
+          text = '\n'.join(line.rstrip() for line in text.splitlines()) + '\n'
           p.write_text(text)
-
-          print("ZSG2 register hook: OK")
-          print("ZSG2 four-channel PCM hook: OK")
-          print("ZSG2 trailing whitespace cleanup: OK")
+          print('ZSG2 register hook: OK (explicit braces)')
+          print('ZSG2 four-channel PCM hook: OK (explicit braces)')
+          print('ZSG2 trailing whitespace cleanup: OK')
           PY
 
           git diff --check
@@ -165,7 +25,6 @@ jobs:
         working-directory: mame
         run: |
           set -euo pipefail
-
           make -j2 \
             SUBTARGET=zsg2 \
             SOURCES=src/mame/sony/zn.cpp,src/mame/sony/taitogn.cpp \
@@ -190,25 +49,17 @@ jobs:
         working-directory: mame
         run: |
           set -euo pipefail
-
           OUT="../package/$ARTIFACT"
-          mkdir -p "$OUT/bin"
-          mkdir -p "$OUT/info"
-          mkdir -p "$OUT/source"
+          mkdir -p "$OUT/bin" "$OUT/info" "$OUT/source"
 
           BIN=""
-
-          for candidate in \
-            ./zsg2 \
-            ./mamezsg2 \
-            ./mame_zsg2
+          for candidate in ./zsg2 ./mamezsg2 ./mame_zsg2
           do
             if test -x "$candidate"; then
               BIN="$candidate"
               break
             fi
           done
-
           if test -z "$BIN"; then
             echo "MAME executable not found"
             exit 1
@@ -216,118 +67,55 @@ jobs:
 
           cp "$BIN" "$OUT/bin/mame-zsg2"
           chmod +x "$OUT/bin/mame-zsg2"
+          "$BIN" -version > "$OUT/info/version.txt"
+          "$BIN" -listfull > "$OUT/info/listfull.txt"
 
-          "$BIN" -version \
-            > "$OUT/info/version.txt"
-
-          "$BIN" -listfull \
-            > "$OUT/info/listfull.txt"
-
-          for GAME in \
-            raystorm \
-            gdarius \
-            raycris \
-            coh1000t \
-            coh3002t
+          for GAME in raystorm gdarius raycris coh1000t coh3002t
           do
             awk -v game="$GAME" '
-              $1 == game {
-                found=1
-                print
-              }
-              END {
-                if (!found) exit 1
-              }
+              $1 == game { found=1; print }
+              END { if (!found) exit 1 }
             ' "$OUT/info/listfull.txt"
-
-            "$BIN" -listxml "$GAME" \
-              > "$OUT/info/$GAME.xml"
+            "$BIN" -listxml "$GAME" > "$OUT/info/$GAME.xml"
           done
 
-          git rev-parse HEAD \
-            > "$OUT/info/mame_commit.txt"
+          git rev-parse HEAD > "$OUT/info/mame_commit.txt"
+          git diff > "$OUT/source/zsg2_analysis.patch"
+          git show HEAD:src/devices/sound/zsg2.cpp > "$OUT/source/zsg2_original.cpp"
+          cp src/devices/sound/zsg2.cpp "$OUT/source/zsg2_instrumented.cpp"
+          cp src/devices/sound/zsg2.h "$OUT/source/"
+          cp src/mame/sony/zn.cpp "$OUT/source/"
+          cp src/mame/sony/taitogn.cpp "$OUT/source/"
 
-          git diff \
-            > "$OUT/source/zsg2_analysis.patch"
-
-          git show HEAD:src/devices/sound/zsg2.cpp \
-            > "$OUT/source/zsg2_original.cpp"
-
-          cp src/devices/sound/zsg2.cpp \
-            "$OUT/source/zsg2_instrumented.cpp"
-
-          cp src/devices/sound/zsg2.h \
-            "$OUT/source/"
-
-          cp src/mame/sony/zn.cpp \
-            "$OUT/source/"
-
-          cp src/mame/sony/taitogn.cpp \
-            "$OUT/source/"
-
-          git ls-files '*taito_zm*' \
-            > "$OUT/info/zoom_source_files.txt"
-
+          git ls-files '*taito_zm*' > "$OUT/info/zoom_source_files.txt"
           while IFS= read -r f; do
             if test -f "$f"; then
               cp "$f" "$OUT/source/"
             fi
           done < "$OUT/info/zoom_source_files.txt"
 
-          ldd "$OUT/bin/mame-zsg2" \
-            > "$OUT/info/ldd.txt"
-
-          file "$OUT/bin/mame-zsg2" \
-            > "$OUT/info/binary_type.txt"
-
-          gcc-12 --version \
-            > "$OUT/info/compiler.txt"
-
-          ldd --version \
-            > "$OUT/info/glibc.txt"
-
-          if test -d plugins; then
-            cp -a plugins "$OUT/"
-          fi
-
-          if test -d hash; then
-            cp -a hash "$OUT/"
-          fi
-
-          if test -f COPYING; then
-            cp COPYING "$OUT/"
-          fi
-
+          ldd "$OUT/bin/mame-zsg2" > "$OUT/info/ldd.txt"
+          file "$OUT/bin/mame-zsg2" > "$OUT/info/binary_type.txt"
+          gcc-12 --version > "$OUT/info/compiler.txt"
+          ldd --version > "$OUT/info/glibc.txt"
+          if test -d plugins; then cp -a plugins "$OUT/"; fi
+          if test -d hash; then cp -a hash "$OUT/"; fi
+          if test -f COPYING; then cp COPYING "$OUT/"; fi
           cat "$OUT/info/version.txt"
 
           cd "$OUT"
-
-          find . -type f \
-            ! -name SHA256SUMS.txt \
-            -print0 \
-            | sort -z \
-            | xargs -0 sha256sum \
-            > SHA256SUMS.txt
-
+          find . -type f ! -name SHA256SUMS.txt -print0 \
+            | sort -z | xargs -0 sha256sum > SHA256SUMS.txt
           sha256sum -c SHA256SUMS.txt
 
       - name: Create ZIP
         run: |
           set -euo pipefail
-
           cd package
-
-          zip -q -r \
-            "../$ARTIFACT.zip" \
-            "$ARTIFACT"
-
+          zip -q -r "../$ARTIFACT.zip" "$ARTIFACT"
           cd ..
-
           unzip -t "$ARTIFACT.zip"
-
-          sha256sum "$ARTIFACT.zip" \
-            > "$ARTIFACT.zip.sha256"
-
+          sha256sum "$ARTIFACT.zip" > "$ARTIFACT.zip.sha256"
           ls -lh "$ARTIFACT.zip"
 
       - name: Upload artifact
@@ -338,4 +126,3 @@ jobs:
             taito-zsg2-mame-linux-x86_64.zip
             taito-zsg2-mame-linux-x86_64.zip.sha256
           compression-level: 0
-          retention-days: 30
