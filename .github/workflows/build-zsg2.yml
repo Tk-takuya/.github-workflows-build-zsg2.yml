@@ -1,3 +1,99 @@
+name: Build TAITO ZSG-2 MAME Linux
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 360
+
+    env:
+      MAME_REV: 61c794064422682db7a1f8b3d58c21563333a9c8
+      ARTIFACT: taito-zsg2-mame-linux-x86_64
+
+    steps:
+      - name: Install dependencies
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential gcc-12 g++-12 \
+            git python3 pkg-config \
+            libsdl2-dev libsdl2-ttf-dev \
+            libfontconfig1-dev libasound2-dev \
+            libpulse-dev libx11-dev \
+            libxi-dev libxinerama-dev \
+            libgl1-mesa-dev libexpat1-dev \
+            zlib1g-dev zip unzip
+
+      - name: Checkout MAME
+        run: |
+          set -euo pipefail
+          mkdir mame
+          cd mame
+          git init
+          git remote add origin https://github.com/mamedev/mame.git
+          git fetch --depth=1 origin "$MAME_REV"
+          git checkout --detach FETCH_HEAD
+          git rev-parse HEAD
+          test "$(git rev-parse HEAD)" = "$MAME_REV"
+          test -f src/mame/sony/zn.cpp
+          test -f src/mame/sony/taitogn.cpp
+          test -f src/devices/sound/zsg2.cpp
+
+      - name: Add ZSG-2 analysis hooks
+        working-directory: mame
+        run: |
+          set -euo pipefail
+
+          python3 <<'PY'
+          from pathlib import Path
+          import re
+
+          p = Path("src/devices/sound/zsg2.cpp")
+          text = p.read_text()
+          if 'ZSG2_TRACE' in text or 'ZSG2_PCM4' in text:
+              raise RuntimeError('ZSG2 hooks already present')
+
+          text = '#include <cstdio>\n#include <cstdlib>\n' + text
+
+          pattern = r'(void zsg2_device::write\s*\([^)]*\)\s*\{)'
+          # Match the existing MAME tab indentation and use explicit braces.
+          hook = '\n'.join([
+              '\tstatic std::FILE *trace_file = []() -> std::FILE * {',
+              '\t\tconst char *path = std::getenv("ZSG2_TRACE");',
+              '\t\treturn path ? std::fopen(path, "wb") : nullptr;',
+              '\t}();',
+              '',
+              '\tif (trace_file)',
+              '\t{',
+              '\t\tstd::fprintf(trace_file,',
+              '\t\t\t"%.17g,%s,%u,%u,%u\\n",',
+              '\t\t\tmachine().time().as_double(), tag(),',
+              '\t\t\tunsigned(offset), unsigned(data), unsigned(mem_mask));',
+              '\t}',
+          ])
+          if len(re.findall(pattern, text)) != 1:
+              raise RuntimeError('ZSG2 register hook anchor missing or ambiguous')
+          text = re.sub(pattern, lambda m: m.group(1) + '\n' + hook + '\n', text)
+
+          # Capture the indentation rather than leaving a whitespace-only line.
+          pattern = (
+              r'^([ \t]*)for\s*\(int output = 0;'
+              r'\s*output < 4;\s*output\+\+\)\s*'
+              r'stream\.put_int_clamp'
+              r'\(output, i, mix\[output\], 32768\);'
+          )
+          lines = [
+              'static std::FILE *pcm_file = []() -> std::FILE * {',
+              '\tconst char *path = std::getenv("ZSG2_PCM4");',
+              '\treturn path ? std::fopen(path, "wb") : nullptr;',
+              '}();',
+              '',
               'if (pcm_file)',
               '{',
               '\tstd::fwrite(mix, sizeof(mix[0]), 4, pcm_file);',
@@ -126,3 +222,4 @@
             taito-zsg2-mame-linux-x86_64.zip
             taito-zsg2-mame-linux-x86_64.zip.sha256
           compression-level: 0
+          retention-days: 30
