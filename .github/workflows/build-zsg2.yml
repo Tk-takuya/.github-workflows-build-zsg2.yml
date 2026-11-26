@@ -146,9 +146,16 @@ jobs:
                   "ZSG2 PCM hook anchor not found"
               )
 
+          # Remove trailing whitespace
+          text = "\n".join(
+              line.rstrip() for line in text.splitlines()
+          ) + "\n"
+
           p.write_text(text)
+
           print("ZSG2 register hook: OK")
           print("ZSG2 four-channel PCM hook: OK")
+          print("ZSG2 trailing whitespace cleanup: OK")
           PY
 
           git diff --check
